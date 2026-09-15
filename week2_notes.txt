@@ -1,0 +1,100 @@
+week2_notes.txt
+Query plan and timing output captured while running the baseline vs optimized
+queries in SQLite, and the CSV vs Parquet comparison in DuckDB.
+
+=========================================================
+1. SQLite: Query 2 (student lookup) — WHERE StudentID = 7
+=========================================================
+
+BEFORE indexes:
+  EXPLAIN QUERY PLAN
+  SELECT * FROM Loan WHERE StudentID = 7;
+  -->  SCAN Loan
+  Average time per run: ~0.0106 ms (180-row table, so the difference is tiny
+  on this small dataset, but the plan shows the database checking every row)
+
+AFTER adding idx_loan_student (CREATE INDEX idx_loan_student ON Loan(StudentID)):
+  EXPLAIN QUERY PLAN
+  SELECT LoanID, ItemID, CheckoutDate, ReturnDate, Status FROM Loan WHERE StudentID = 7;
+  -->  SEARCH Loan USING INDEX idx_loan_student (StudentID=?)
+  Average time per run: ~0.0057 ms
+
+Observation: the plan changed from SCAN (full table scan) to SEARCH ... USING
+INDEX. On a 180-row table the timing difference is small, but on a much
+larger Loan table this is the difference between reading every row and
+jumping straight to the matching ones.
+
+=========================================================
+2. SQLite: Query 3 (currently checked out) — WHERE Status = 'checked_out'
+=========================================================
+
+BEFORE indexes:
+  -->  SCAN Loan
+
+AFTER adding idx_loan_status:
+  -->  SEARCH Loan USING INDEX idx_loan_status (Status=?)
+
+Observation: Status only has two possible values (checked_out / returned),
+so this is a low-cardinality column. The index still gets used here, but
+per the Week 2 lesson, an index like this helps less than one on a
+high-cardinality column like StudentID or CheckoutDate, since roughly half
+the table still matches either value.
+
+=========================================================
+3. SQLite: Query 1 (full semester report)
+=========================================================
+
+BASELINE (SELECT *, all three tables joined, no date filter):
+  -->  SCAN Loan
+  -->  SEARCH Student USING INTEGER PRIMARY KEY (rowid=?)
+  -->  SEARCH Item USING INTEGER PRIMARY KEY (rowid=?)
+  Rows returned: 180
+
+OPTIMIZED (selected columns only, filtered to CheckoutDate >= '2025-08-25',
+after adding idx_loan_checkoutdate):
+  -->  SEARCH Loan USING INDEX idx_loan_checkoutdate (CheckoutDate>?)
+  -->  SEARCH Student USING INTEGER PRIMARY KEY (rowid=?)
+  -->  SEARCH Item USING INTEGER PRIMARY KEY (rowid=?)
+  Rows returned: 130
+
+Observation: the Loan step switched from a full SCAN to a SEARCH using the
+new CheckoutDate index, and the result shrank from 180 rows to 130 rows
+(only this semester's loans) because last semester's 50 old loans were
+filtered out before the joins ran, not after.
+
+=========================================================
+4. DuckDB: CSV vs Parquet analytical query
+=========================================================
+
+Query used for both files:
+  SELECT ItemCategory, COUNT(*) AS loan_count
+  FROM 'data/loan.csv' (or 'data/loan.parquet')
+  GROUP BY ItemCategory;
+
+Both files returned the same 8 rows (one per item category), for example:
+  Calculator       13
+  Camera           29
+  Laptop           28
+  Microphone       18
+  Projector        31
+  Tablet           27
+  Tripod           24
+  Whiteboard Kit   10
+
+Query plan on the CSV file used READ_CSV_AUTO as the scan step.
+Query plan on the Parquet file used PARQUET_SCAN as the scan step, and
+DuckDB's own row estimate for that scan step was noticeably lower than for
+the CSV scan, since Parquet stores column metadata (like how many distinct
+values are in ItemCategory) that the engine can use before touching the
+raw data.
+
+File size on disk for this 180-row sample:
+  data/loan.csv      ~12.3 KB
+  data/loan.parquet   ~5.6 KB
+
+Observation: the Parquet file was less than half the size of the CSV,
+even with this small dataset, because columnar storage groups repeated
+values (like the 8 category names, repeated across 180 rows) together and
+compresses them. On a much larger Loan table, that space savings and the
+ability to skip reading unused columns both make Parquet-style storage
+faster to scan for analytics questions like "how many loans per category."
