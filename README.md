@@ -1,4 +1,4 @@
-# CST 335 — Week 2: Analyzing and Improving Query Performance
+Analyzing and Improving Query Performance
 
 ## Scenario
 
